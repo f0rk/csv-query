@@ -1,0 +1,37 @@
+Query a CSV file with SQL
+
+Call csv-query with -h for help.
+
+Requires python.
+
+Examples:
+
+Imagine we have a file, colors.csv, with the following data:
+
+Id,Color,Color Name,Description,Hex #,Inventory,Add Date
+1,red,Red,Having the color of blood,#f00,0.25,2014-10-16
+2,green,Green,Having the color of growing grass,#0f0,10.18,2014-08-25
+3,blue,Blue,Having the color of the clear sky,#00f,4.67,2014-09-17
+
+To perform a basic query:
+~$ csv-query --file /tmp/colors.csv --query "select * from colors"
+
+Id,Color,Color Name,Description,Hex #,Inventory,Add Date
+1,red,Red,Having the color of blood,#f00,0.25,2014-10-16
+2,green,Green,Having the color of growing grass,#0f0,10.18,2014-08-25
+3,blue,Blue,Having the color of the clear sky,#00f,4.67,2014-09-17
+
+To do some filtering:
+~$ csv-query --file /tmp/colors.csv --query "select * from colors where \"Color\" = 'red'"
+
+Id,Color,Color Name,Description,Hex #,Inventory,Add Date
+1,red,Red,Having the color of blood,#f00,0.25,2014-10-16
+
+Aggregate functions:
+~$ csv-query --file /tmp/colors.csv --query "select count(*) as rows from colors"
+
+rows
+3
+
+Under the hood, the data is copied into an in-memory SQLite database. You have
+access to all SQLite query functionality.

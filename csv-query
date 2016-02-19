@@ -1,0 +1,244 @@
+#!/usr/bin/env python
+
+import os
+import re
+import csv
+import sys
+import sqlite3
+import argparse
+import subprocess
+
+
+# without this, we may encounter fields larger than can be read
+csv.field_size_limit(sys.maxsize)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--file", "-f", help="csv file", required=True)
+parser.add_argument("--delimiter", "-d", help="csv delimiter", default=",")
+parser.add_argument("--quote", "-q", help="csv quote", default='"')
+parser.add_argument("--table", "-t", help="table name", default=None)
+parser.add_argument("--schema", help="schema name", default=None)
+parser.add_argument("--mogrify", "-m", help="clean names",
+                    action="store_true", default=False)
+parser.add_argument("--lower", "-l", help="lowercase names",
+                    action="store_true", default=False)
+parser.add_argument("--fix-duplicates",
+                    help=("handle duplicate column names by appending an "
+                          "increasing suffix"),
+                    default=False, action="store_true")
+parser.add_argument("--file-column",
+                    help=("add a column to the created table which will contain "
+                          "the name of the file the data was loaded from"),
+                    default=None)
+parser.add_argument("--gzip", help="the file is in gzip format",
+                    action="store_true", default=False)
+parser.add_argument("--missing-headers",
+                    help="file is missing headers, make up column names",
+                    action="store_true", default=False)
+parser.add_argument("--primary-key", help=("column(s) to make part of the "
+                                          "primary key"))
+parser.add_argument("--serial-column", help=("add serial column of the given "
+                                             "name"))
+parser.add_argument("--query", help="the query to execute", required=True)
+
+args = parser.parse_args()
+
+# check that our given file exists
+if not args.file or not os.path.exists(args.file):
+    sys.stderr.write("file '{}' does not exist.\n".format(args.file))
+    sys.exit(1)
+
+# identifier quoting function
+def quote_ident(name):
+    name = name.replace('"', '""')
+    return '"' + name + '"'
+
+# escape helper
+def escape(val):
+    return val.replace("'", "''")
+
+# name cleaner function
+empties = ""
+def clean_name(name):
+    global empties
+    name = name.strip()
+    name = re.sub(r'[^a-zA-Z0-9_]', "_", name)
+    name = re.sub(r'_+', "_", name)
+    if args.lower:
+        name = name.lower()
+    if not name:
+        empties += "_"
+        name = empties + ""
+    return name
+
+# construct a table name from the file name
+if args.table is None:
+    path_parts = os.path.split(args.file)
+    file_name = path_parts[1]
+
+    pieces = file_name.split(".")
+    if len(pieces) > 1:
+        if pieces[-1] == "gz":
+            pieces.pop()
+        pieces = pieces[:-1]
+
+    table_name = ".".join(pieces)
+
+    if args.mogrify:
+        table_name = clean_name(table_name)
+else:
+    table_name = args.table
+
+# get a handle on things
+if args.gzip:
+    process = subprocess.Popen(["zcat", args.file], stdout=subprocess.PIPE)
+    fp = process.stdout
+else:
+    fp = open(args.file, "rU")
+
+# some help to pass tabs
+delimiter = args.delimiter
+if delimiter in ("\\t", "\\\\t"):
+    delimiter = "\t"
+
+# start processing the file
+first = True
+header_mapping = {}
+reader = csv.DictReader(fp, delimiter=delimiter, quotechar=args.quote)
+
+# figure out the column name and types
+seen_column_names = {}
+
+# if a file name column was requested, pre-seed that name here
+if args.file_column is not None:
+    seen_column_names[args.file_column] = 0
+
+columns = []
+
+for i, record in enumerate(reader):
+    fields = reader.fieldnames
+
+    if not header_mapping:
+        if args.mogrify:
+            for field in fields:
+                header_mapping[field] = clean_name(field)
+        else:
+            # strip quotes to work with less chance of failure.
+            header_mapping = {f: f.replace('"', "") for f in fields}
+
+    # by default, every column will be unset
+    if not columns:
+        columns = [None] * len(fields)
+
+    # build a table with some hopefully reasonable types
+    for i, field in enumerate(fields):
+        value = record[field]
+
+        if args.missing_headers:
+            column_name = "col_{}".format(i)
+        else:
+            column_name = header_mapping[field]
+            if args.fix_duplicates:
+                if column_name in seen_column_names:
+                    original_name = column_name
+                    suffix = seen_column_names[original_name] + 1
+                    column_name = "{}_{}".format(original_name, suffix)
+                    seen_column_names[original_name] = suffix
+                else:
+                    seen_column_names[column_name] = 0
+
+        # not seen, use what we've got
+        if columns[i] is None:
+            columns[i] = column_name
+
+    break
+
+# if we're using gzip, kill the process we started
+if args.gzip:
+    process.kill()
+
+# generate our name clause
+name_clause = ""
+if args.schema:
+    name_clause += quote_ident(args.schema) + "."
+name_clause += quote_ident(table_name)
+
+# generate our columns clause for table create
+columns_fragments = []
+for column_name in columns:
+    column_fragment = "    {}".format(quote_ident(column_name))
+    columns_fragments.append(column_fragment)
+
+# if we requested a column containing the filename, add that in
+if args.file_column is not None:
+    file_column_frag = ("    {} text default '{}'"
+                        .format(quote_ident(args.file_column),
+                                escape(args.file)))
+    columns_fragments = [file_column_frag] + columns_fragments
+
+columns_clause = ",\n".join(columns_fragments)
+
+# connect to in memory sqlite
+dbh = sqlite3.connect(":memory:")
+cursor = dbh.cursor()
+
+# maybe create a schema
+if args.schema:
+    cursor.execute("create schema {};".format(quote_ident(args.schema)))
+
+# do our table create statement
+table_clause = "create table"
+stmt = "{} {} (".format(table_clause, name_clause)
+
+if args.serial_column:
+    stmt += '\n    {} serial,'.format(quote_ident(args.serial_column))
+
+stmt += columns_clause + ("," if args.primary_key else "")
+
+if args.primary_key:
+    pkey = [c.strip() for c in args.primary_key.split(",") if c.strip()]
+
+    pkey_clause = []
+
+    if args.serial_column in pkey:
+        pkey_clause.append(quote_ident(args.serial_column))
+
+    for field in fields:
+        if field in pkey or header_mapping[field] in pkey:
+            col = header_mapping[field]
+            pkey_clause.append(quote_ident(col))
+
+    pkey_clause = "    primary key (" + ", ".join(pkey_clause) + ")"
+    stmt += pkey_clause
+
+stmt += ");"
+cursor.execute(stmt)
+
+if args.gzip:
+    process = subprocess.Popen(["zcat", args.file], stdout=subprocess.PIPE)
+    fp = process.stdout
+else:
+    fp = open(args.file, "rU")
+
+reader = csv.DictReader(fp, delimiter=delimiter, quotechar=args.quote)
+
+to_insert = []
+for row in reader:
+    to_insert.append([row[f] for f in fields])
+
+insert_stmt = "insert into "
+if args.schema:
+    insert_stmt += quote_ident(args.schema) + "."
+
+column_names = [quote_ident(c) for c in columns]
+binds = ["?"] * len(column_names)
+insert_stmt += quote_ident(table_name) + "(" + ", ".join(column_names) + ") values (" + ", ".join(binds) + ")"
+cursor.executemany(insert_stmt, to_insert)
+
+results = cursor.execute(args.query)
+
+writer = csv.writer(sys.stdout)
+for i, row in enumerate(results):
+    if i == 0:
+        writer.writerow([c[0] for c in cursor.description])
+    writer.writerow(row)
