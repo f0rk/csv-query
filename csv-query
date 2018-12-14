@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 
+import argparse
+import codecs
+import csv
 import os
 import re
-import csv
-import sys
 import sqlite3
-import argparse
 import subprocess
+import sys
 
 
 # without this, we may encounter fields larger than can be read
@@ -39,13 +40,30 @@ parser.add_argument("--primary-key", help=("column(s) to make part of the "
                                           "primary key"))
 parser.add_argument("--serial-column", help=("add serial column of the given "
                                              "name"))
-parser.add_argument("--query", help="the query to execute", required=True)
+parser.add_argument("--query", help="the query to execute")
+parser.add_argument("--query-file", help="the query to execute, as a file")
 
 args = parser.parse_args()
 
 # check that our given file exists
 if not args.file or not os.path.exists(args.file):
     sys.stderr.write("file '{}' does not exist.\n".format(args.file))
+    sys.exit(1)
+
+# figure out what's up with our query
+if not args.query and not args.query_file:
+    sys.stdout.write("neither --query nor --query-file specified, you must "
+                     "specify one or the other.\n")
+    sys.exit(1)
+
+if args.query:
+    query = args.query
+else:
+    with open(args.query_file, "r") as query_fp:
+        query = query_fp.read()
+
+if not query:
+    sys.stdout.write("query was empty.\n")
     sys.exit(1)
 
 # identifier quoting function
@@ -94,7 +112,9 @@ if args.gzip:
     process = subprocess.Popen(["zcat", args.file], stdout=subprocess.PIPE)
     fp = process.stdout
 else:
-    fp = open(args.file, "rU")
+    fp = open(args.file, "rb")
+
+fpu = codecs.getreader("utf-8")(fp)
 
 # some help to pass tabs
 delimiter = args.delimiter
@@ -104,7 +124,7 @@ if delimiter in ("\\t", "\\\\t", "tab", "TAB"):
 # start processing the file
 first = True
 header_mapping = {}
-reader = csv.DictReader(fp, delimiter=delimiter, quotechar=args.quote)
+reader = csv.DictReader(fpu, delimiter=delimiter, quotechar=args.quote)
 
 # figure out the column name and types
 seen_column_names = {}
@@ -218,9 +238,11 @@ if args.gzip:
     process = subprocess.Popen(["zcat", args.file], stdout=subprocess.PIPE)
     fp = process.stdout
 else:
-    fp = open(args.file, "rU")
+    fp = open(args.file, "rb")
 
-reader = csv.DictReader(fp, delimiter=delimiter, quotechar=args.quote)
+fpu = codecs.getreader("utf-8")(fp)
+
+reader = csv.DictReader(fpu, delimiter=delimiter, quotechar=args.quote)
 
 to_insert = []
 for row in reader:
